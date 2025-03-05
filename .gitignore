@@ -1,3 +1,7 @@
+# Local files
+local/*
+
+# Streamlit secrets
 .streamlit/secrets.toml
 
 # Byte-compiled / optimized / DLL files

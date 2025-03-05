@@ -1,151 +1,113 @@
+import os
+import sqlite3
 import streamlit as st
 import pandas as pd
 import math
 from pathlib import Path
+from local.paths import db_path
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
+    page_title='Head CT Report Findings',
+    page_icon=':brain:', # This is an emoji shortcode. Could be a URL too.
 )
-
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
-
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
-
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
-
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
-
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
-
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
 
 # Set the title that appears at the top of the page.
 '''
-# :earth_americas: GDP dashboard
+# :brain: Head CT Report Findings
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
+Common findings identified in head CT radiology reports.
 '''
 
 # Add some spacing
 ''
 ''
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+@st.cache_data
+def get_data():
+    
+    # Collect all reports_ into one data frame
+    report_dbs = [f for f in os.listdir(db_path) if f.startswith('reports_') and f.endswith('.db')]
+    dfs = []
+    for db in report_dbs:
+        db_path_full = os.path.join(db_path, db)
+        conn = sqlite3.connect(db_path_full)
+        df = pd.read_sql_query("SELECT * FROM reports", conn)
+        conn.close()
+        dfs.append(df)
+    reports_df = pd.concat(dfs, ignore_index=True)
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
+    # Collect all annotations
+    annotations = {"artifacts": "artifacts.db", "findings": "findings.db", "devices": "medical_devices.db"}
+    annotations_dfs = {}
 
-countries = gdp_df['Country Code'].unique()
+    for annotation, db_name in annotations.items():
+        db_file_path = os.path.join(db_path, db_name)
+        conn = sqlite3.connect(db_file_path)
+        table_query = "SELECT name FROM sqlite_master WHERE type='table';"
+        table_name = pd.read_sql_query(table_query, conn)["name"].iloc[0]
+        df = pd.read_sql_query(f"SELECT * FROM {table_name};", conn)
+        conn.close()
+        annotations_dfs[annotation] = df
 
-if not len(countries):
-    st.warning("Select at least one country")
+    return reports_df, annotations_dfs["findings"], annotations_dfs["artifacts"], annotations_dfs["devices"]
 
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
+reports_df, findings_df, artifacts_df, devices_df = get_data()
 
-''
-''
-''
+annotated_reports = reports_df[reports_df["is_reviewed"] == 1]
+nr_annotated_reports = len(annotated_reports) + 1
+st.header(f'Annotated reports', divider='gray')
+progress_bar = st.progress(0)
+progress_bar.progress(nr_annotated_reports / 150)
+status_text = st.empty()
+status_text.text(f"Progress: {nr_annotated_reports}/{150}")
 
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
+st.header(f'Present findings', divider='gray')
 
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+findings_df['finding'] = findings_df['finding'].str.lower()
+words_to_remove = ['tiny', 'left', 'right', 'posterior', 'thin', 'mild']
+findings_df['finding'] = findings_df['finding'].apply(lambda x: ' '.join([word for word in x.split() if word.lower() not in words_to_remove]))
 
-st.header(f'GDP in {to_year}', divider='gray')
 
-''
+findings = findings_df[findings_df["is_present"] == 1]["finding"].value_counts()
+present_findings = pd.DataFrame(findings).rename(columns={"finding": "count"})
+st.bar_chart(present_findings)
 
-cols = st.columns(4)
+st.header(f'Explicitly missing findings', divider='gray')
+missing_findings = findings_df[findings_df["is_present"] == 0]["finding"].value_counts()
+st.bar_chart(missing_findings)
 
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
+st.header(f'Commonly used medical devices', divider='gray')
+devices_df = devices_df.rename(columns={"catheter": "device"})
+# Split rows containing 'and' in device column into separate rows
+split_rows = []
+for idx, row in devices_df.iterrows():
+    if ' and ' in str(row['device']):
+        devices = row['device'].split(' and ')
+        for device in devices:
+            new_row = row.copy()
+            new_row['device'] = device.strip()
+            split_rows.append(new_row)
+    else:
+        split_rows.append(row)
+devices_df = pd.DataFrame(split_rows)
+# Replace 'tube' with 'line' in device column
+devices_df['device'] = devices_df['device'].str.replace('enteric', 'enteric tube')
+devices_df['device'] = devices_df['device'].str.replace('endotracheal tubes', 'endotracheal tube')
 
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
 
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
 
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+devices_df['device'] = devices_df['device'].str.lower()
+words_to_remove = ['left', 'right', 'frontal', 'posterior', 'multiple']
+devices_df['device'] = devices_df['device'].apply(lambda x: ' '.join([word for word in x.split() if word.lower() not in words_to_remove]))
+devices = devices_df["device"].value_counts()
+st.bar_chart(devices)
+
+st.header(f'Ocurring artifacts', divider='gray')
+artifacts_df['artifact'] = artifacts_df['artifact'].str.lower()
+words_to_remove = ['mild', 'artifact']
+artifacts_df['artifact'] = artifacts_df['artifact'].apply(lambda x: ' '.join([word for word in x.split() if word.lower() not in words_to_remove]))
+
+artifacts = artifacts_df["artifact"].value_counts()
+st.bar_chart(artifacts)
